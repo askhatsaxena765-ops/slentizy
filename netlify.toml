@@ -1,0 +1,20 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+# Netlify Functions: serve /api/* from netlify/functions/
+# This makes /api/resolve-track reach the serverless function.
+[functions]
+  directory = "netlify/functions"
+
+# Redirect all /api/* requests to the Netlify Functions
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+
+# SPA fallback for client-side routing
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
