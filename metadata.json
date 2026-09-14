@@ -1,0 +1,6 @@
+{
+  "name": "Slentizy",
+  "description": "A high-performance music streaming application featuring full-length audio playback, live search across millions of songs, custom playlists, liked songs, queue manager, and lyrics mode.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
