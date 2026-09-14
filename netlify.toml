@@ -2,18 +2,21 @@
   command = "npm run build"
   publish = "dist"
 
-# Netlify Functions: serve /api/* from netlify/functions/
-# This makes /api/resolve-track reach the serverless function.
+# Netlify Functions directory.
+# NOTE: function files MUST use the .cjs extension because package.json sets
+# "type": "module". A .js file would be parsed as ESM and the CommonJS
+# `exports.handler` assignment would be silently ignored, causing Netlify to
+# return 502 for every /api/* request.
 [functions]
   directory = "netlify/functions"
 
-# Redirect all /api/* requests to the Netlify Functions
+# Redirect /api/* requests to the Netlify Functions runtime.
 [[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/:splat"
   status = 200
 
-# SPA fallback for client-side routing
+# SPA fallback for client-side routing.
 [[redirects]]
   from = "/*"
   to = "/index.html"
