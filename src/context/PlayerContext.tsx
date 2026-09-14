@@ -137,6 +137,19 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const currentTrackRef = useRef<Track | null>(null);
   const handleTrackEndedRef = useRef<() => void>(() => {});
 
+  // Manual playback-time tracker.
+  // The YouTube IFrame player is kept off-screen (1x1 at -9999px) when the
+  // user is not viewing the video. In that minimized state the embedded player
+  // often reports getCurrentTime() === 0 even while audio is playing, which
+  // froze the progress bar at 0:00. These refs track elapsed time on the
+  // wall clock so progress keeps moving regardless of what YouTube reports.
+  const playStartedAtRef = useRef<number | null>(null);
+  const accumulatedElapsedRef = useRef<number>(0);
+  const getManualElapsed = (): number => {
+    if (playStartedAtRef.current === null) return accumulatedElapsedRef.current;
+    return accumulatedElapsedRef.current + (Date.now() / 1000 - playStartedAtRef.current);
+  };
+
   // Refs used to decouple the progress-polling interval from React state
   // updates. Without these, every setCurrentTime call would tear down and
   // recreate the interval, causing getCurrentTime() to frequently return 0
@@ -372,10 +385,20 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
                   // PLAYING
                   setIsPlaying(true);
                   setIsLoading(false);
+                  // Start / resume the wall-clock elapsed tracker so the
+                  // progress bar keeps moving even when YouTube reports 0.
+                  if (playStartedAtRef.current === null) {
+                    playStartedAtRef.current = Date.now() / 1000;
+                  } else {
+                    accumulatedElapsedRef.current = getManualElapsed();
+                    playStartedAtRef.current = Date.now() / 1000;
+                  }
                   try {
                     const cur = event.target.getCurrentTime();
-                    if (typeof cur === 'number' && !isNaN(cur) && cur >= 0) {
+                    if (typeof cur === 'number' && !isNaN(cur) && cur > 0) {
                       setCurrentTime(cur);
+                      accumulatedElapsedRef.current = cur;
+                      playStartedAtRef.current = null;
                     }
                     const dur = event.target.getDuration();
                     if (typeof dur === 'number' && !isNaN(dur) && dur > 0) {
@@ -385,9 +408,18 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
                 } else if (event.data === 2) {
                   // PAUSED
                   setIsPlaying(false);
+                  // Freeze the accumulated elapsed time at the pause point.
+                  if (playStartedAtRef.current !== null) {
+                    accumulatedElapsedRef.current = getManualElapsed();
+                    playStartedAtRef.current = null;
+                  }
                 } else if (event.data === 0) {
                   // ENDED
                   setIsPlaying(false);
+                  if (playStartedAtRef.current !== null) {
+                    accumulatedElapsedRef.current = getManualElapsed();
+                    playStartedAtRef.current = null;
+                  }
                   handleTrackEndedRef.current();
                 } else if (event.data === 3) {
                   // BUFFERING
@@ -472,8 +504,15 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       if (engine === 'youtube' && ytPlayerRef.current) {
         try {
           const cur = ytPlayerRef.current.getCurrentTime();
-          if (typeof cur === 'number' && Number.isFinite(cur) && cur >= 0) {
+          // YouTube IFrame frequently returns 0 when the player is minimized
+          // off-screen. Fall back to the wall-clock elapsed tracker so the
+          // progress bar keeps moving instead of freezing at 0:00.
+          const manualCur = getManualElapsed();
+          if (typeof cur === 'number' && Number.isFinite(cur) && cur > 0) {
             setCurrentTime(cur);
+            accumulatedElapsedRef.current = cur;
+          } else if (manualCur > 0) {
+            setCurrentTime(manualCur);
           }
           const dur = ytPlayerRef.current.getDuration();
           if (typeof dur === 'number' && Number.isFinite(dur) && dur > 0) {
@@ -486,6 +525,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         const audio = audioRef.current;
         if (Number.isFinite(audio.currentTime)) {
           setCurrentTime(audio.currentTime);
+          accumulatedElapsedRef.current = audio.currentTime;
         }
         if (Number.isFinite(audio.duration) && audio.duration > 0) {
           setDuration(Math.round(audio.duration));
@@ -677,6 +717,8 @@ handleTrackEndedRef.current = handleTrackEnded;
     setCurrentTrack(track);
     currentTrackRef.current = track;
     setCurrentTime(0);
+    accumulatedElapsedRef.current = 0;
+    playStartedAtRef.current = null;
 
     // Immediately display full track duration
     if (track.duration && track.duration > 0) {
@@ -893,49 +935,66 @@ const playTrack = (track: Track, newQueue?: Track[]) => {
      loadAndPlay(tracksToPlay[initialIndex]);
    };
 
-   const togglePlay = () => {
-     if (!currentTrack && queue.length > 0) {
-       playTrack(queue[0]);
-       return;
-     }
+const togglePlay = () => {
+      if (!currentTrack && queue.length > 0) {
+        playTrack(queue[0]);
+        return;
+      }
 
-     if (playbackEngine === 'youtube' && ytPlayerRef.current) {
-       if (isPlaying) {
-         ytPlayerRef.current.pauseVideo();
-         setIsPlaying(false);
-       } else {
-         ytPlayerRef.current.playVideo();
-         setIsPlaying(true);
-       }
-       return;
-     }
+      if (playbackEngine === 'youtube' && ytPlayerRef.current) {
+        if (isPlaying) {
+          ytPlayerRef.current.pauseVideo();
+          setIsPlaying(false);
+          if (playStartedAtRef.current !== null) {
+            accumulatedElapsedRef.current = getManualElapsed();
+            playStartedAtRef.current = null;
+          }
+        } else {
+          ytPlayerRef.current.playVideo();
+          setIsPlaying(true);
+          if (playStartedAtRef.current === null) {
+            playStartedAtRef.current = Date.now() / 1000;
+          }
+        }
+        return;
+      }
 
-     if (!audioRef.current) return;
-     if (isPlaying) {
-       audioRef.current.pause();
-     } else {
-       audioRef.current.play().catch(console.error);
-     }
-   };
+      if (!audioRef.current) return;
+      if (isPlaying) {
+        audioRef.current.pause();
+        setIsPlaying(false);
+      } else {
+        audioRef.current.play().catch(console.error);
+        setIsPlaying(true);
+      }
+    };
 
-   const pause = () => {
-     if (playbackEngine === 'youtube' && ytPlayerRef.current) {
-       ytPlayerRef.current.pauseVideo();
-       setIsPlaying(false);
-     }
-     if (audioRef.current) {
-       audioRef.current.pause();
-     }
-   };
+    const pause = () => {
+      if (playbackEngine === 'youtube' && ytPlayerRef.current) {
+        ytPlayerRef.current.pauseVideo();
+        setIsPlaying(false);
+      }
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      if (playStartedAtRef.current !== null) {
+        accumulatedElapsedRef.current = getManualElapsed();
+        playStartedAtRef.current = null;
+      }
+    };
 
-   const resume = () => {
-     if (playbackEngine === 'youtube' && ytPlayerRef.current) {
-       ytPlayerRef.current.playVideo();
-       setIsPlaying(true);
-     } else if (audioRef.current) {
-       audioRef.current.play().catch(console.error);
-     }
-   };
+    const resume = () => {
+      if (playbackEngine === 'youtube' && ytPlayerRef.current) {
+        ytPlayerRef.current.playVideo();
+        setIsPlaying(true);
+        if (playStartedAtRef.current === null) {
+          playStartedAtRef.current = Date.now() / 1000;
+        }
+      } else if (audioRef.current) {
+        audioRef.current.play().catch(console.error);
+        setIsPlaying(true);
+      }
+    };
 
    const nextTrack = () => {
      // Repeat One: restart the current track
@@ -980,6 +1039,7 @@ const playTrack = (track: Track, newQueue?: Track[]) => {
 
   const seek = (seconds: number) => {
     setCurrentTime(seconds);
+    accumulatedElapsedRef.current = seconds;
     if (playbackEngine === 'youtube' && ytPlayerRef.current) {
       try {
         ytPlayerRef.current.seekTo(seconds, true);

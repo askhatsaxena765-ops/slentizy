@@ -91,13 +91,13 @@ import React, { useState } from 'react';
   return (
     <footer
       id="slentizy-player-bar"
-      className="h-20 md:h-22 bg-[#121212]/95 backdrop-blur-2xl border-t border-white/5 px-4 flex items-center justify-between z-30 select-none shadow-2xl"
+      className="h-16 sm:h-20 md:h-22 bg-[#121212]/95 backdrop-blur-2xl border-t border-white/5 px-2 sm:px-4 flex items-center justify-between z-30 select-none shadow-2xl"
     >
       {/* 1. Left: Track Info & Quick Actions */}
-      <div className="flex items-center gap-3 w-[30%] min-w-[180px]">
+      <div className="flex items-center gap-2 w-[38%] min-w-[120px] sm:w-[30%] sm:min-w-[180px]">
         {currentTrack ? (
           <>
-            <div className="relative group w-14 h-14 rounded overflow-hidden shrink-0 shadow bg-[#282828]">
+            <div className="relative group w-10 h-10 sm:w-14 sm:h-14 rounded overflow-hidden shrink-0 shadow bg-[#282828]">
               <img
                 src={currentTrack.artwork}
                 alt={currentTrack.title}
@@ -113,11 +113,11 @@ import React, { useState } from 'react';
               </button>
             </div>
 
-            <div className="flex flex-col min-w-0 max-w-[180px] lg:max-w-xs">
+            <div className="flex flex-col min-w-0 max-w-[80px] sm:max-w-[180px] lg:max-w-xs">
               <div className="flex items-center gap-1.5">
                 <span
                   onClick={() => setIsLyricsOpen(true)}
-                  className="text-sm font-semibold text-white truncate cursor-pointer hover:underline"
+                  className="text-xs sm:text-sm font-semibold text-white truncate cursor-pointer hover:underline"
                 >
                   {currentTrack.title}
                 </span>
@@ -151,9 +151,9 @@ import React, { useState } from 'react';
       </div>
 
       {/* 2. Center: Controls & Scrubber */}
-      <div className="flex flex-col items-center gap-1.5 max-w-[722px] w-[40%]">
+      <div className="flex flex-col items-center gap-1 max-w-[722px] w-[40%]">
         {/* Buttons Row */}
-        <div className="flex items-center gap-4 md:gap-6">
+        <div className="flex items-center gap-3 sm:gap-4 md:gap-6">
           {/* Shuffle */}
           <button
             id="player-shuffle-btn"
@@ -184,7 +184,7 @@ import React, { useState } from 'react';
             id="player-play-pause-btn"
             onClick={togglePlay}
             title={isPlaying ? 'Pause' : 'Play'}
-            className="w-8 h-8 md:w-9 md:h-9 rounded-full bg-white hover:scale-105 active:scale-95 flex items-center justify-center text-black shadow-lg transition-transform"
+            className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-white hover:scale-105 active:scale-95 flex items-center justify-center text-black shadow-lg transition-transform"
           >
             {isPlaying ? (
               <Pause className="w-4 h-4 fill-black text-black" />
@@ -208,7 +208,7 @@ import React, { useState } from 'react';
             id="player-repeat-btn"
             onClick={cycleRepeatMode}
             title={`Repeat: ${repeatMode}`}
-            className={`relative p-1 transition-colors ${
+            className={`relative p-1 transition-colors hidden sm:flex ${
               repeatMode !== 'off' ? 'text-[#10b981]' : 'text-neutral-400 hover:text-white'
             }`}
           >
@@ -224,8 +224,8 @@ import React, { useState } from 'react';
         </div>
 
         {/* Progress Scrubber */}
-        <div className="w-full flex items-center gap-2 text-[11px] font-mono text-neutral-400">
-          <span className="w-10 text-right">
+        <div className="w-full flex items-center gap-2 text-[10px] sm:text-[11px] font-mono text-neutral-400">
+          <span className="w-8 sm:w-10 text-right">
             {formatTime(isSeeking ? seekValue : currentTime)}
           </span>
 
@@ -256,7 +256,7 @@ import React, { useState } from 'react';
             />
           </div>
 
-          <span className="w-10 text-left">{formatTime(duration || currentTrack?.duration || 0)}</span>
+          <span className="w-8 sm:w-10 text-left">{formatTime(duration || currentTrack?.duration || 0)}</span>
         </div>
       </div>
 
@@ -287,7 +287,7 @@ import React, { useState } from 'react';
         </button>
 
         {/* Volume controls */}
-        <div className="hidden sm:flex items-center gap-2 group">
+        <div className="hidden md:flex items-center gap-2 group">
           <button
             onClick={toggleMute}
             title={isMuted ? 'Unmute' : 'Mute'}
