@@ -140,6 +140,9 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const handleTrackEndedRef = useRef<() => void>(() => {});
   // Timeout ID for scheduled track-end detection (fallback for background tabs)
   const trackEndTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Monotonically increasing ID to identify the current loadAndPlay call.
+  // Any async work from a previous call will have a stale loadId and be ignored.
+  const loadIdRef = useRef<number>(0);
 
   // Manual playback-time tracker.
   // The YouTube IFrame player is kept off-screen (1x1 at -9999px) when the
@@ -157,7 +160,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   // Schedule a timeout to call handleTrackEnded when the current track should end.
   // This is a fallback for background tabs where YouTube onStateChange / HTML5 ended
   // events may not fire reliably due to browser timer throttling.
-  const scheduleTrackEndTimeout = (trackDuration: number) => {
+  const scheduleTrackEndTimeout = (trackDuration: number, trackId?: string) => {
     // Clear any existing timeout
     if (trackEndTimeoutRef.current) {
       clearTimeout(trackEndTimeoutRef.current);
@@ -168,10 +171,16 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     // Schedule timeout for track duration (in ms) + small buffer
     const timeoutMs = trackDuration * 1000 + 500; // 500ms buffer
     trackEndTimeoutRef.current = setTimeout(() => {
-      // Only trigger if still playing (the event handlers would have cleared this if track ended normally)
+      // Only trigger if still playing AND the track hasn't changed
+      // (the event handlers would have cleared this if track ended normally)
       if (isPlayingRef.current && handleTrackEndedRef.current) {
-        console.log('[Background fallback] Track end timeout fired, calling handleTrackEnded');
-        handleTrackEndedRef.current();
+        // Verify the track is still the same one we scheduled for
+        if (!trackId || currentTrackRef.current?.id === trackId) {
+          console.log('[Background fallback] Track end timeout fired, calling handleTrackEnded');
+          handleTrackEndedRef.current();
+        } else {
+          console.log('[Background fallback] Track changed, ignoring stale timeout');
+        }
       }
       trackEndTimeoutRef.current = null;
     }, timeoutMs);
@@ -416,6 +425,10 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
                 } catch {}
               },
               onStateChange: (event: any) => {
+                // Only process state changes if there's a current track
+                // (prevents stale events from previous videos)
+                if (!currentTrackRef.current) return;
+
                 if (event.data === 1) {
                   // PLAYING
                   setIsPlaying(true);
@@ -450,12 +463,16 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
                   }
                 } else if (event.data === 0) {
                   // ENDED
-                  setIsPlaying(false);
-                  if (playStartedAtRef.current !== null) {
-                    accumulatedElapsedRef.current = getManualElapsed();
-                    playStartedAtRef.current = null;
+                  // Verify this is still the current track before handling end
+                  // (prevents stale ended events from previous videos)
+                  if (currentTrackRef.current) {
+                    setIsPlaying(false);
+                    if (playStartedAtRef.current !== null) {
+                      accumulatedElapsedRef.current = getManualElapsed();
+                      playStartedAtRef.current = null;
+                    }
+                    handleTrackEndedRef.current();
                   }
-                  handleTrackEndedRef.current();
                 } else if (event.data === 3) {
                   // BUFFERING
                   setIsLoading(true);
@@ -513,8 +530,11 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         const trackDuration = currentTrackRef.current.duration || 0;
         if (trackDuration > 0 && elapsed >= trackDuration - 1) {
           // Track should have ended while tab was hidden
-          console.log('[Visibility] Tab became visible, track should have ended, calling handleTrackEnded');
-          handleTrackEndedRef.current();
+          // Verify this is still the track we care about
+          if (currentTrackRef.current) {
+            console.log('[Visibility] Tab became visible, track should have ended, calling handleTrackEnded');
+            handleTrackEndedRef.current();
+          }
         }
       }
     };
@@ -609,7 +629,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           ytPlayerRef.current.seekTo(0, true);
           ytPlayerRef.current.playVideo();
           if (currentTrack?.duration) {
-            scheduleTrackEndTimeout(currentTrack.duration);
+            scheduleTrackEndTimeout(currentTrack.duration, currentTrack.id);
           }
           return;
         }
@@ -617,7 +637,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           audioRef.current.currentTime = 0;
           audioRef.current.play().catch(console.error);
           if (currentTrack?.duration) {
-            scheduleTrackEndTimeout(currentTrack.duration);
+            scheduleTrackEndTimeout(currentTrack.duration, currentTrack.id);
           }
         }
         return;
@@ -823,6 +843,10 @@ handleTrackEndedRef.current = handleTrackEnded;
   };
 
   const loadAndPlay = async (track: Track) => {
+    // Increment loadId to mark this as the current load operation.
+    // Any async work from previous calls will see a stale loadId and bail out.
+    const thisLoadId = ++loadIdRef.current;
+
     // Clear any pending track-end timeout from previous track
     clearTrackEndTimeout();
 
@@ -861,6 +885,9 @@ handleTrackEndedRef.current = handleTrackEnded;
       );
       clearTimeout(timeoutId);
 
+      // Bail out if a newer loadAndPlay call has superseded this one
+      if (loadIdRef.current !== thisLoadId) return;
+
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
@@ -889,8 +916,13 @@ handleTrackEndedRef.current = handleTrackEnded;
         }
       }
     } catch (err) {
+      // Bail out if a newer loadAndPlay call has superseded this one
+      if (loadIdRef.current !== thisLoadId) return;
       console.warn('Track resolution timed out or encountered error, attempting direct playback:', err);
     }
+
+    // Bail out if a newer loadAndPlay call has superseded this one
+    if (loadIdRef.current !== thisLoadId) return;
 
     // Helper to check if a URL is an iTunes preview (30-second clip)
     function isPreviewUrl(url?: string): boolean {
@@ -902,7 +934,7 @@ handleTrackEndedRef.current = handleTrackEnded;
     // If the YouTube player is not yet ready, wait briefly for it instead of
     // falling back to a 30-second preview.
     if (resolvedVideoId) {
-      if (ytPlayerRef.current) {
+      if (ytPlayerRef.current && isYtReady) {
         setPlaybackEngine('youtube');
         if (audioRef.current) {
           audioRef.current.pause();
@@ -917,11 +949,42 @@ handleTrackEndedRef.current = handleTrackEnded;
           ytPlayerRef.current.playVideo();
           setIsPlaying(true);
           setIsLoading(false);
-          scheduleTrackEndTimeout(resolvedDuration);
+          scheduleTrackEndTimeout(resolvedDuration, track.id);
           return;
         } catch (e) {
           console.warn('YouTube loadVideoById failed, trying HTML5 fallback:', e);
         }
+      } else if (ytPlayerRef.current && !isYtReady) {
+        // Player exists but not ready yet - wait for onReady
+        const waitForReady = () => {
+          if (loadIdRef.current !== thisLoadId) return; // stale load
+          if (isYtReady) {
+            setPlaybackEngine('youtube');
+            if (audioRef.current) {
+              audioRef.current.pause();
+            }
+            try {
+              ytPlayerRef.current!.loadVideoById({
+                videoId: resolvedVideoId,
+                startSeconds: 0,
+              });
+              ytPlayerRef.current!.setPlaybackRate(playbackRate);
+              ytPlayerRef.current!.setVolume(isMuted ? 0 : Math.round(volume * 100));
+              ytPlayerRef.current!.playVideo();
+              setIsPlaying(true);
+              setIsLoading(false);
+              scheduleTrackEndTimeout(resolvedDuration, track.id);
+            } catch (e) {
+              console.warn('YouTube playback failed after ready, trying HTML5:', e);
+              playHtml5Fallback(thisLoadId);
+            }
+          } else {
+            // Check again in 100ms, but give up after ~2 seconds
+            setTimeout(waitForReady, 100);
+          }
+        };
+        waitForReady();
+        return;
       } else {
         // YouTube player not ready yet. Wait briefly for it to initialize
         // instead of immediately falling back to a preview URL.
@@ -929,33 +992,68 @@ handleTrackEndedRef.current = handleTrackEnded;
         const maxAttempts = 20; // up to ~2 seconds
         const waitInterval = setInterval(() => {
           attempts++;
+          if (loadIdRef.current !== thisLoadId) {
+            clearInterval(waitInterval);
+            return;
+          }
           if (ytPlayerRef.current) {
             clearInterval(waitInterval);
-            setPlaybackEngine('youtube');
-            if (audioRef.current) {
-              audioRef.current.pause();
-            }
-            try {
-              ytPlayerRef.current.loadVideoById({
-                videoId: resolvedVideoId,
-                startSeconds: 0,
-              });
-              ytPlayerRef.current.setPlaybackRate(playbackRate);
-              ytPlayerRef.current.setVolume(isMuted ? 0 : Math.round(volume * 100));
-              ytPlayerRef.current.playVideo();
-              setIsPlaying(true);
-              setIsLoading(false);
-              scheduleTrackEndTimeout(resolvedDuration);
-            } catch (e) {
-              console.warn('YouTube playback failed after wait, trying HTML5:', e);
-              playHtml5Fallback();
+            if (!isYtReady) {
+              // Player created but not ready - wait for ready
+              const waitForReady = () => {
+                if (loadIdRef.current !== thisLoadId) return;
+                if (isYtReady) {
+                  setPlaybackEngine('youtube');
+                  if (audioRef.current) {
+                    audioRef.current.pause();
+                  }
+                  try {
+                    ytPlayerRef.current!.loadVideoById({
+                      videoId: resolvedVideoId,
+                      startSeconds: 0,
+                    });
+                    ytPlayerRef.current!.setPlaybackRate(playbackRate);
+                    ytPlayerRef.current!.setVolume(isMuted ? 0 : Math.round(volume * 100));
+                    ytPlayerRef.current!.playVideo();
+                    setIsPlaying(true);
+                    setIsLoading(false);
+                    scheduleTrackEndTimeout(resolvedDuration, track.id);
+                  } catch (e) {
+                    console.warn('YouTube playback failed after ready, trying HTML5:', e);
+                    playHtml5Fallback(thisLoadId);
+                  }
+                } else {
+                  setTimeout(waitForReady, 100);
+                }
+              };
+              waitForReady();
+            } else {
+              setPlaybackEngine('youtube');
+              if (audioRef.current) {
+                audioRef.current.pause();
+              }
+              try {
+                ytPlayerRef.current.loadVideoById({
+                  videoId: resolvedVideoId,
+                  startSeconds: 0,
+                });
+                ytPlayerRef.current.setPlaybackRate(playbackRate);
+                ytPlayerRef.current.setVolume(isMuted ? 0 : Math.round(volume * 100));
+                ytPlayerRef.current.playVideo();
+                setIsPlaying(true);
+                setIsLoading(false);
+                scheduleTrackEndTimeout(resolvedDuration, track.id);
+              } catch (e) {
+                console.warn('YouTube playback failed after wait, trying HTML5:', e);
+                playHtml5Fallback(thisLoadId);
+              }
             }
             return;
           }
           if (attempts >= maxAttempts) {
             clearInterval(waitInterval);
             console.warn('YouTube player did not initialize in time, trying HTML5 fallback');
-            playHtml5Fallback();
+            playHtml5Fallback(thisLoadId);
           }
         }, 100);
         return;
@@ -964,9 +1062,12 @@ handleTrackEndedRef.current = handleTrackEnded;
 
     // Otherwise, play using HTML5 audio engine with JioSaavn direct audio
     // (only if it is a real full-length track, never an iTunes preview).
-    playHtml5Fallback();
+    playHtml5Fallback(thisLoadId);
 
-    function playHtml5Fallback() {
+    function playHtml5Fallback(loadId: number) {
+      // Bail out if a newer loadAndPlay call has superseded this one
+      if (loadIdRef.current !== loadId) return;
+
       if (!audioRef.current) {
         setIsLoading(false);
         return;
@@ -996,21 +1097,26 @@ handleTrackEndedRef.current = handleTrackEnded;
         audioRef.current
           .play()
           .then(() => {
+            // Bail out if a newer loadAndPlay call has superseded this one
+            if (loadIdRef.current !== loadId) return;
             setIsPlaying(true);
             setIsLoading(false);
-            scheduleTrackEndTimeout(resolvedDuration);
+            scheduleTrackEndTimeout(resolvedDuration, track.id);
           })
           .catch(err => {
+            if (loadIdRef.current !== loadId) return;
             console.warn('Primary stream autoplay or play error:', err);
             if (candidateFallback && !isPreviewUrl(candidateFallback) && audioRef.current && audioRef.current.src !== candidateFallback) {
               audioRef.current.src = candidateFallback;
               audioRef.current.playbackRate = playbackRate;
               audioRef.current.load();
               audioRef.current.play().then(() => {
+                if (loadIdRef.current !== loadId) return;
                 setIsPlaying(true);
                 setIsLoading(false);
-                scheduleTrackEndTimeout(resolvedDuration);
+                scheduleTrackEndTimeout(resolvedDuration, track.id);
               }).catch(e => {
+                if (loadIdRef.current !== loadId) return;
                 console.warn('Fallback stream error:', e);
                 setIsLoading(false);
                 setIsPlaying(false);
@@ -1030,6 +1136,9 @@ handleTrackEndedRef.current = handleTrackEnded;
   };
 
 const playTrack = (track: Track, newQueue?: Track[]) => {
+     // Guard against starting a new load while one is already in progress
+     if (isLoading) return;
+     
      if (newQueue && newQueue.length > 0) {
        setQueue(newQueue);
        const idx = newQueue.findIndex(t => t.id === track.id);
@@ -1062,7 +1171,7 @@ const togglePlay = () => {
         return;
       }
 
-      if (playbackEngine === 'youtube' && ytPlayerRef.current) {
+      if (playbackEngine === 'youtube' && ytPlayerRef.current && isYtReady) {
         if (isPlaying) {
           clearTrackEndTimeout();
           ytPlayerRef.current.pauseVideo();
@@ -1072,6 +1181,8 @@ const togglePlay = () => {
             playStartedAtRef.current = null;
           }
         } else {
+          // Guard against starting playback while loading
+          if (isLoading) return;
           ytPlayerRef.current.playVideo();
           setIsPlaying(true);
           if (playStartedAtRef.current === null) {
@@ -1079,7 +1190,7 @@ const togglePlay = () => {
           }
           // Schedule track-end timeout for resumed playback
           if (currentTrack?.duration) {
-            scheduleTrackEndTimeout(currentTrack.duration);
+            scheduleTrackEndTimeout(currentTrack.duration, currentTrack.id);
           }
         }
         return;
@@ -1091,17 +1202,19 @@ const togglePlay = () => {
         audioRef.current.pause();
         setIsPlaying(false);
       } else {
+        // Guard against starting playback while loading
+        if (isLoading) return;
         audioRef.current.play().catch(console.error);
         setIsPlaying(true);
         if (currentTrack?.duration) {
-          scheduleTrackEndTimeout(currentTrack.duration);
+          scheduleTrackEndTimeout(currentTrack.duration, currentTrack.id);
         }
       }
     };
 
     const pause = () => {
       clearTrackEndTimeout();
-      if (playbackEngine === 'youtube' && ytPlayerRef.current) {
+      if (playbackEngine === 'youtube' && ytPlayerRef.current && isYtReady) {
         ytPlayerRef.current.pauseVideo();
         setIsPlaying(false);
       }
@@ -1115,30 +1228,33 @@ const togglePlay = () => {
     };
 
     const resume = () => {
-      if (playbackEngine === 'youtube' && ytPlayerRef.current) {
+      if (playbackEngine === 'youtube' && ytPlayerRef.current && isYtReady) {
         ytPlayerRef.current.playVideo();
         setIsPlaying(true);
         if (playStartedAtRef.current === null) {
           playStartedAtRef.current = Date.now() / 1000;
         }
         if (currentTrack?.duration) {
-          scheduleTrackEndTimeout(currentTrack.duration);
+          scheduleTrackEndTimeout(currentTrack.duration, currentTrack.id);
         }
       } else if (audioRef.current) {
         audioRef.current.play().catch(console.error);
         setIsPlaying(true);
         if (currentTrack?.duration) {
-          scheduleTrackEndTimeout(currentTrack.duration);
+          scheduleTrackEndTimeout(currentTrack.duration, currentTrack.id);
         }
       }
     };
 
-   const nextTrack = () => {
-     // Repeat One: restart the current track
-     if (repeatMode === 'one' && currentTrack) {
-       loadAndPlay(currentTrack);
-       return;
-     }
+const nextTrack = () => {
+      // Guard against starting a new load while one is already in progress
+      if (isLoading) return;
+      
+      // Repeat One: restart the current track
+      if (repeatMode === 'one' && currentTrack) {
+        loadAndPlay(currentTrack);
+        return;
+      }
 
      const next = getNextTrack();
      if (next) {
@@ -1157,9 +1273,12 @@ const togglePlay = () => {
      setIsPlaying(false);
    };
 
-   const previousTrack = () => {
-     // If we are more than 3 seconds into the track, seek to the beginning
-     if (currentTime > 3) {
+const previousTrack = () => {
+      // Guard against starting a new load while one is already in progress
+      if (isLoading) return;
+      
+      // If we are more than 3 seconds into the track, seek to the beginning
+      if (currentTime > 3) {
        seek(0);
        return;
      }
