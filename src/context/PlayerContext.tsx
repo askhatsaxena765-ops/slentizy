@@ -86,6 +86,12 @@ const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
   const AUTOPLAY_STORAGE_KEY = 'slentizy_autoplay';
   const CROSSFADE_STORAGE_KEY = 'slentizy_crossfade';
   const PLAYBACK_CONTEXT_STORAGE_KEY = 'slentizy_playback_context';
+const MUTE_STORAGE_KEY = 'slentizy_mute';
+
+function isPreviewUrl(url?: string): boolean {
+  if (!url) return false;
+  return /\/preview\//i.test(url) || /preview\//i.test(url);
+}
 
 export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -99,7 +105,10 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const saved = localStorage.getItem(VOLUME_STORAGE_KEY) || localStorage.getItem('spotify_player_volume');
     return saved !== null ? parseFloat(saved) : 0.75;
   });
-  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [isMuted, setIsMuted] = useState<boolean>(() => {
+    const saved = localStorage.getItem(MUTE_STORAGE_KEY);
+    return saved === 'true';
+  });
   const [isShuffle, setIsShuffle] = useState<boolean>(() => {
     const saved = localStorage.getItem(SHUFFLE_STORAGE_KEY);
     return saved === 'true';
@@ -332,6 +341,10 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, [crossfadeEnabled]);
 
   useEffect(() => {
+    localStorage.setItem(MUTE_STORAGE_KEY, String(isMuted));
+  }, [isMuted]);
+
+  useEffect(() => {
     try {
       if (playbackContext) {
         localStorage.setItem(PLAYBACK_CONTEXT_STORAGE_KEY, JSON.stringify(playbackContext));
@@ -555,7 +568,9 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       audio.removeEventListener('error', handleError);
       audio.pause();
       try {
-        if (ytInstance) ytInstance.destroy();
+        if (ytPlayerRef.current && typeof ytPlayerRef.current.destroy === 'function') {
+          ytPlayerRef.current.destroy();
+        }
       } catch {}
     };
   }, []);
@@ -956,12 +971,6 @@ handleTrackEndedRef.current = handleTrackEnded;
 
     // Bail out if a newer loadAndPlay call has superseded this one
     if (loadIdRef.current !== thisLoadId) return;
-
-    // Helper to check if a URL is an iTunes preview (30-second clip)
-    function isPreviewUrl(url?: string): boolean {
-      if (!url) return false;
-      return /\/preview\//i.test(url) || /preview\//i.test(url);
-    }
 
     // Play using YouTube Player if a video ID is available.
     // If the YouTube player is not yet ready, wait briefly for it instead of

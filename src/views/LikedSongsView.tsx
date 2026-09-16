@@ -128,7 +128,7 @@ export const LikedSongsView: React.FC<LikedSongsViewProps> = ({ onAddToPlaylistC
                 key={track.id}
                 track={track}
                 index={i}
-                playlistContext={filteredTracks}
+                playlistContext={likedTracks}
                 onAddToPlaylistClick={onAddToPlaylistClick}
               />
             ))}

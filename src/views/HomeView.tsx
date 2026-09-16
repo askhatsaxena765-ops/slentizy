@@ -265,7 +265,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onAddToPlaylistClick }) => {
             {history.slice(0, 6).map((track) => (
               <div
                 key={track.id}
-                onClick={() => playTrack(track, history)}
+                onClick={() => playTrack(track)}
                 className="group p-3.5 bg-white/[0.03] hover:bg-white/[0.07] rounded-xl cursor-pointer transition-all duration-300 flex flex-col gap-3 border border-white/5 shadow-md hover:border-white/10"
               >
                 <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[#242424] shadow-lg">
@@ -278,7 +278,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onAddToPlaylistClick }) => {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      playTrack(track, history);
+                      playTrack(track);
                     }}
                     title={`Play ${track.title}`}
                     className="absolute bottom-2.5 right-2.5 w-11 h-11 rounded-full bg-[#10b981] text-black flex items-center justify-center shadow-xl opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 transition-all duration-300 hover:scale-105"

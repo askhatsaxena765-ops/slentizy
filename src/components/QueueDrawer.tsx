@@ -106,7 +106,7 @@ export const QueueDrawer: React.FC = () => {
                     className="group flex items-center gap-3 p-2 rounded-md hover:bg-white/5 cursor-pointer transition-colors"
                   >
                     <div
-                      onClick={() => playTrack(track, queue)}
+                      onClick={() => playTrack(track)}
                       className="relative w-10 h-10 rounded overflow-hidden shrink-0"
                     >
                       <img
@@ -121,7 +121,7 @@ export const QueueDrawer: React.FC = () => {
                     </div>
 
                     <div
-                      onClick={() => playTrack(track, queue)}
+                      onClick={() => playTrack(track)}
                       className="flex flex-col min-w-0 flex-1"
                     >
                       <span className="text-sm font-medium text-white truncate group-hover:text-[#1db954]">

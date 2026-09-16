@@ -180,7 +180,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                 <TrackRow
                   track={track}
                   index={i}
-                  playlistContext={filteredTracks}
+                  playlistContext={playlist.tracks}
                   onAddToPlaylistClick={onAddToPlaylistClick}
                 />
                 {playlist.isCustom && (
