@@ -129,10 +129,10 @@ export const SearchView: React.FC<SearchViewProps> = ({ onAddToPlaylistClick }) 
                   <h2 className="text-xl font-extrabold text-white tracking-tight">
                     Top result
                   </h2>
-                  <div
-                    onClick={() => playTrack(topResult, results)}
-                    className="group relative p-6 bg-white/[0.04] hover:bg-white/[0.08] rounded-2xl cursor-pointer transition-all duration-300 flex flex-col gap-4 shadow-xl border border-white/5 hover:border-emerald-500/30"
-                  >
+<div
+                      onClick={() => playTrack(topResult)}
+                      className="group relative p-6 bg-white/[0.04] hover:bg-white/[0.08] rounded-2xl cursor-pointer transition-all duration-300 flex flex-col gap-4 shadow-xl border border-white/5 hover:border-emerald-500/30"
+                    >
                     <div className="relative w-32 h-32 rounded-xl overflow-hidden shadow-2xl bg-[#282828]">
                       <img
                         src={topResult.artwork}
@@ -163,7 +163,7 @@ export const SearchView: React.FC<SearchViewProps> = ({ onAddToPlaylistClick }) 
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        playTrack(topResult, results);
+                        playTrack(topResult);
                       }}
                       title={`Play ${topResult.title}`}
                       className="absolute bottom-6 right-6 w-12 h-12 rounded-full bg-[#10b981] text-black flex items-center justify-center shadow-xl opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 transition-all duration-300 hover:scale-105"
@@ -173,51 +173,26 @@ export const SearchView: React.FC<SearchViewProps> = ({ onAddToPlaylistClick }) 
                   </div>
                 </div>
 
-                {/* Top 4 Matching Songs (3 cols) */}
+{/* Top 4 Matching Songs (3 cols) */}
                 <div className="lg:col-span-3 space-y-3">
                   <h2 className="text-xl font-extrabold text-white tracking-tight">
                     Songs
                   </h2>
                   <div className="space-y-1">
-                    {results.slice(0, 4).map((track, i) => (
-                      <TrackRow
-                        key={track.id}
-                        track={track}
-                        index={i}
-                        playlistContext={results}
-                        onAddToPlaylistClick={onAddToPlaylistClick}
-                        showAlbum={false}
-                      />
-                    ))}
+                    {results.map((track, i) => (
+                       <TrackRow
+                         key={track.id}
+                         track={track}
+                         index={i}
+                         onAddToPlaylistClick={onAddToPlaylistClick}
+                         showAlbum={false}
+                       />
+                     ))}
                   </div>
                 </div>
               </div>
-
-              {/* All Search Results Table */}
-              <div className="space-y-3 mt-4">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-xl font-extrabold text-white tracking-tight">
-                    All tracks matching "{searchQuery}"
-                  </h2>
-                  <span className="text-xs font-semibold text-neutral-400">
-                    {results.length} songs found
-                  </span>
-                </div>
-
-                <div className="space-y-1">
-                  {results.map((track, i) => (
-                    <TrackRow
-                      key={track.id}
-                      track={track}
-                      index={i}
-                      playlistContext={results}
-                      onAddToPlaylistClick={onAddToPlaylistClick}
-                    />
-                  ))}
-                </div>
-              </div>
             </>
-          ) : (
+           ) : (
             <div className="flex flex-col items-center justify-center py-20 text-center gap-3">
               <Disc className="w-12 h-12 text-neutral-600 mb-1" />
               <h3 className="text-lg font-bold text-white">No results found for "{searchQuery}"</h3>
