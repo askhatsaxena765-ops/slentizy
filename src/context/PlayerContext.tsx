@@ -25,6 +25,7 @@ interface PlayerContextType {
   // Premium playback settings
   autoplayEnabled: boolean;
   setAutoplayEnabled: (enabled: boolean) => void;
+  autoplayLoading: boolean;
   crossfadeEnabled: boolean;
   setCrossfadeEnabled: (enabled: boolean) => void;
   playbackContext: { type: 'playlist' | 'liked' | 'search' | 'queue'; id?: string; tracks: Track[] } | null;
@@ -122,6 +123,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const saved = localStorage.getItem(CROSSFADE_STORAGE_KEY);
     return saved === 'true';
   });
+  const [autoplayLoading, setAutoplayLoading] = useState<boolean>(false);
   const [playbackContext, setPlaybackContext] = useState<{ type: 'playlist' | 'liked' | 'search' | 'queue'; id?: string; tracks: Track[] } | null>(() => {
     try {
       const saved = localStorage.getItem(PLAYBACK_CONTEXT_STORAGE_KEY);
@@ -542,8 +544,14 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, []);
 
 // Handler for track end
+    // SINGLE source of truth for what happens when a track finishes.
+    // NOTE: queueIndex MUST be advanced before/while starting the next
+    // track. Previously getNextTrack() returned queue[queueIndex + 1]
+    // without moving queueIndex, so the index never advanced and the
+    // same track replayed on every song end (even with Repeat Off).
     const handleTrackEnded = () => {
-      // Repeat One: replay the same track immediately
+      // Repeat One: replay the exact same track immediately.
+      // This is the ONLY path allowed to replay the current track.
       if (repeatMode === 'one') {
         if (playbackEngine === 'youtube' && ytPlayerRef.current) {
           ytPlayerRef.current.seekTo(0, true);
@@ -557,7 +565,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         return;
       }
 
-      // Determine the next track to play
+      // Determine the next track to play (advancing queueIndex as needed)
       const next = getNextTrack();
 
       if (next) {
@@ -565,22 +573,28 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         return;
       }
 
-      // No next track available
+      // No next track available in the queue/context.
+      // Repeat Queue: restart the whole queue from the beginning.
       if (repeatMode === 'queue' && queue.length > 0) {
-        // Repeat the whole queue from the beginning
         setQueueIndex(0);
         loadAndPlay(queue[0]);
         return;
       }
 
-      // Autoplay: if enabled and no next track, fetch new music
+      // Autoplay: if enabled, fetch a NEW recommendation.
+      // The current track is explicitly excluded so it can never replay.
       if (autoplayEnabled) {
+        setAutoplayLoading(true);
         fetchAutoplayTrack().then(track => {
           if (track) {
+            // Append autoplay track to queue and advance queueIndex
+            setQueue(prev => [...prev, track]);
+            setQueueIndex(prev => prev + 1);
             loadAndPlay(track);
             return;
           }
           setIsPlaying(false);
+          setAutoplayLoading(false);
         });
         return;
       }
@@ -591,91 +605,133 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
 handleTrackEndedRef.current = handleTrackEnded;
 
-    // Autoplay: fetch a new track using the existing music API when the queue
-    // is exhausted and Autoplay is enabled. Never uses iTunes previewUrl or
-    // SoundHelix as a generic fallback for real songs.
-    const fetchAutoplayTrack = async (): Promise<Track | null> => {
-      try {
-        const seeds = CURATED_PLAYLIST_SEEDS.map(s => s.query);
-        const randomSeed = seeds[Math.floor(Math.random() * seeds.length)];
-        const tracks = await fetchTracksByTerm(randomSeed, 10);
-        if (!tracks || tracks.length === 0) return null;
+// Autoplay: fetch a new track using the existing music API when the queue
+  // is exhausted and Autoplay is enabled. Never uses iTunes previewUrl or
+  // SoundHelix as a generic fallback for real songs.
+  const fetchAutoplayTrack = async (): Promise<Track | null> => {
+    try {
+      const seeds = CURATED_PLAYLIST_SEEDS.map(s => s.query);
+      const randomSeed = seeds[Math.floor(Math.random() * seeds.length)];
+      const tracks = await fetchTracksByTerm(randomSeed, 10);
+      if (!tracks || tracks.length === 0) return null;
 
-        // Filter out the current track to avoid immediate repeats
-        const filtered = currentTrack
-          ? tracks.filter(t => t.id !== currentTrack.id)
-          : tracks;
-        const pool = filtered.length > 0 ? filtered : tracks;
-        return pool[Math.floor(Math.random() * pool.length)];
-      } catch (e) {
-        console.warn('Autoplay track fetch failed:', e);
+      // Filter out the current track to avoid immediate repeats
+      // Compare both ID and title+artist since IDs can differ between sources
+      const filtered = currentTrack
+        ? tracks.filter(t => t.id !== currentTrack.id && (t.title !== currentTrack.title || t.artist !== currentTrack.artist))
+        : tracks;
+      const pool = filtered.length > 0 ? filtered : tracks;
+      return pool[Math.floor(Math.random() * pool.length)];
+    } catch (e) {
+      console.warn('Autoplay track fetch failed:', e);
+      return null;
+    }
+  };
+
+// Returns the next track based on queue, shuffle, and playback context.
+    // IMPORTANT: this function ADVANCES queueIndex when returning a track from
+    // the queue. Without this advancement the index would stay put and the
+    // same track would replay on every song end (even with Repeat Off).
+    // Returns null when there is no valid next track to play.
+    const getNextTrack = (): Track | null => {
+      const currentId = currentTrack?.id;
+
+      // Defensive: if queueIndex is out of sync with currentTrack (e.g. after
+      // manual playTrack call or queue mutation), resync it so we don't
+      // incorrectly compute the next track from a stale index.
+      if (queue.length > 0 && currentId) {
+        const actualIdx = queue.findIndex(t => t.id === currentId);
+        if (actualIdx !== -1 && actualIdx !== queueIndex) {
+          setQueueIndex(actualIdx);
+        }
+      }
+
+      // If we have a queue, use it as the primary sequence
+      if (queue.length > 0) {
+        if (isShuffle) {
+          // Avoid immediately repeating the same track when possible.
+          // If the queue only contains the current track, repeating is the
+          // only option and Repeat One would normally handle that — here we
+          // still return it so the caller can decide (Repeat Queue / Off).
+          if (queue.length === 1) {
+            return queue[0];
+          }
+          let attempts = 0;
+          while (attempts < 50) {
+            const randomIndex = Math.floor(Math.random() * queue.length);
+            if (queue[randomIndex].id !== currentId) {
+              setQueueIndex(randomIndex);
+              return queue[randomIndex];
+            }
+            attempts++;
+          }
+          // Fallback: pick any track that is not the current one
+          const other = queue.find(t => t.id !== currentId);
+          if (other) {
+            setQueueIndex(queue.findIndex(t => t.id === other.id));
+            return other;
+          }
+          return queue[0];
+        }
+
+        // Sequential: advance past the current track
+        const nextIdx = queueIndex + 1;
+        if (nextIdx < queue.length) {
+          setQueueIndex(nextIdx);
+          return queue[nextIdx];
+        }
+
+        // Reached the end of the queue
         return null;
       }
+
+      // No queue: fall back to playback context if available
+      if (playbackContext && playbackContext.tracks && playbackContext.tracks.length > 0) {
+        const tracks = playbackContext.tracks;
+        const currentIndex = tracks.findIndex(t => t.id === currentId);
+        const nextIdx = currentIndex >= 0 ? currentIndex + 1 : -1;
+
+        if (nextIdx >= 0 && nextIdx < tracks.length) {
+          setQueue(tracks);
+          setQueueIndex(nextIdx);
+          return tracks[nextIdx];
+        }
+
+        if (isShuffle && tracks.length > 0) {
+          if (tracks.length === 1) {
+            return tracks[0];
+          }
+          let attempts = 0;
+          while (attempts < 50) {
+            const randomIndex = Math.floor(Math.random() * tracks.length);
+            if (tracks[randomIndex].id !== currentId) {
+              setQueue(tracks);
+              setQueueIndex(randomIndex);
+              return tracks[randomIndex];
+            }
+            attempts++;
+          }
+          const other = tracks.find(t => t.id !== currentId);
+          if (other) {
+            setQueue(tracks);
+            setQueueIndex(tracks.findIndex(t => t.id === other.id));
+            return other;
+          }
+          return tracks[0];
+        }
+      }
+
+      return null;
     };
 
-    // Returns the next track based on queue, shuffle, and playback context.
-   // Returns null when there is no valid next track to play.
-   const getNextTrack = (): Track | null => {
-     // If we have a queue, use it as the primary sequence
-     if (queue.length > 0) {
-       if (isShuffle) {
-         // Avoid immediately repeating the same track when possible
-         let attempts = 0;
-         while (attempts < 50) {
-           const randomIndex = Math.floor(Math.random() * queue.length);
-           // If there is only one track in the queue, we cannot avoid repeating it
-           if (queue.length === 1 || queue[randomIndex].id !== currentTrack?.id) {
-             return queue[randomIndex];
-           }
-           attempts++;
-         }
-         // Fallback: if we could not find a different track, return the first one
-         return queue[0];
-       }
-
-       if (queueIndex + 1 < queue.length) {
-         return queue[queueIndex + 1];
-       }
-
-       // Reached the end of the queue
-       return null;
-     }
-
-     // No queue: fall back to playback context if available
-     if (playbackContext && playbackContext.tracks && playbackContext.tracks.length > 0) {
-       const tracks = playbackContext.tracks;
-       const currentIndex = tracks.findIndex(t => t.id === currentTrack?.id);
-       const nextIdx = currentIndex >= 0 ? currentIndex + 1 : -1;
-
-       if (nextIdx >= 0 && nextIdx < tracks.length) {
-         setQueue(tracks);
-         setQueueIndex(nextIdx);
-         return tracks[nextIdx];
-       }
-
-       if (isShuffle && tracks.length > 0) {
-         let attempts = 0;
-         while (attempts < 50) {
-           const randomIndex = Math.floor(Math.random() * tracks.length);
-           if (tracks.length === 1 || tracks[randomIndex].id !== currentTrack?.id) {
-             setQueue(tracks);
-             setQueueIndex(randomIndex);
-             return tracks[randomIndex];
-           }
-           attempts++;
-         }
-         return tracks[0];
-       }
-     }
-
-     return null;
-   };
-
    // Returns the previous track based on queue and shuffle state.
+   // Updates queueIndex to point to the returned track.
    const getPreviousTrack = (): Track | null => {
      if (queue.length > 0) {
        if (queueIndex > 0) {
-         return queue[queueIndex - 1];
+         const prevIdx = queueIndex - 1;
+         setQueueIndex(prevIdx);
+         return queue[prevIdx];
        }
        return null;
      }
@@ -1266,12 +1322,13 @@ return (
          isVideoMode,
          setIsVideoMode,
          playbackEngine,
-         autoplayEnabled,
-         setAutoplayEnabled,
-         crossfadeEnabled,
-         setCrossfadeEnabled,
-         playbackContext,
-         setPlaybackContext,
+autoplayEnabled,
+          setAutoplayEnabled,
+          autoplayLoading,
+          crossfadeEnabled,
+          setCrossfadeEnabled,
+          playbackContext,
+          setPlaybackContext,
        }}
      >
       {children}
