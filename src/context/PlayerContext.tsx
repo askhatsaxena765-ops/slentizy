@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import { Track, Playlist, RepeatMode, ViewType } from '../types';
 import { CURATED_PLAYLIST_SEEDS } from '../data/defaultPlaylists';
 import { fetchTracksByTerm, FALLBACK_TRACKS, sanitizeTrackAudioUrls, sanitizePlaylistAudioUrls } from '../services/musicApi';
+import { getRecommendationsByTrack } from '../services/recommendations';
 
 interface PlayerContextType {
   // Playback state
@@ -143,6 +144,9 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   // Monotonically increasing ID to identify the current loadAndPlay call.
   // Any async work from a previous call will have a stale loadId and be ignored.
   const loadIdRef = useRef<number>(0);
+
+  const recentlyRecommendedIdsRef = useRef<string[]>([]);
+  const MAX_RECENT_RECOMMENDATIONS = 20;
 
   // Manual playback-time tracker.
   // The YouTube IFrame player is kept off-screen (1x1 at -9999px) when the
@@ -688,13 +692,42 @@ handleTrackEndedRef.current = handleTrackEnded;
   // SoundHelix as a generic fallback for real songs.
   const fetchAutoplayTrack = async (): Promise<Track | null> => {
     try {
+      if (currentTrack) {
+        const excludedIds = [
+          currentTrack.id,
+          ...queue.map(t => t.id),
+          ...history.map(t => t.id),
+          ...recentlyRecommendedIdsRef.current,
+        ];
+        const recs = await getRecommendationsByTrack(currentTrack, {
+          limit: 12,
+          excludeTrackIds: excludedIds,
+        });
+        if (recs && recs.length > 0) {
+          const filtered = recs.filter(
+            t =>
+              t.id !== currentTrack.id &&
+              (t.title !== currentTrack.title || t.artist !== currentTrack.artist)
+          );
+          const pool = filtered.length > 0 ? filtered : recs;
+          const next = pool[Math.floor(Math.random() * pool.length)];
+          if (next && next.id) {
+            recentlyRecommendedIdsRef.current.push(next.id);
+            if (recentlyRecommendedIdsRef.current.length > MAX_RECENT_RECOMMENDATIONS) {
+              recentlyRecommendedIdsRef.current = recentlyRecommendedIdsRef.current.slice(
+                recentlyRecommendedIdsRef.current.length - MAX_RECENT_RECOMMENDATIONS
+              );
+            }
+          }
+          return next;
+        }
+      }
+
       const seeds = CURATED_PLAYLIST_SEEDS.map(s => s.query);
       const randomSeed = seeds[Math.floor(Math.random() * seeds.length)];
       const tracks = await fetchTracksByTerm(randomSeed, 10);
       if (!tracks || tracks.length === 0) return null;
 
-      // Filter out the current track to avoid immediate repeats
-      // Compare both ID and title+artist since IDs can differ between sources
       const filtered = currentTrack
         ? tracks.filter(t => t.id !== currentTrack.id && (t.title !== currentTrack.title || t.artist !== currentTrack.artist))
         : tracks;
