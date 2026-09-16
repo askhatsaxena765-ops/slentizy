@@ -138,6 +138,8 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const currentFallbacksRef = useRef<string[]>([]);
   const currentTrackRef = useRef<Track | null>(null);
   const handleTrackEndedRef = useRef<() => void>(() => {});
+  // Timeout ID for scheduled track-end detection (fallback for background tabs)
+  const trackEndTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Manual playback-time tracker.
   // The YouTube IFrame player is kept off-screen (1x1 at -9999px) when the
@@ -150,6 +152,36 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const getManualElapsed = (): number => {
     if (playStartedAtRef.current === null) return accumulatedElapsedRef.current;
     return accumulatedElapsedRef.current + (Date.now() / 1000 - playStartedAtRef.current);
+  };
+
+  // Schedule a timeout to call handleTrackEnded when the current track should end.
+  // This is a fallback for background tabs where YouTube onStateChange / HTML5 ended
+  // events may not fire reliably due to browser timer throttling.
+  const scheduleTrackEndTimeout = (trackDuration: number) => {
+    // Clear any existing timeout
+    if (trackEndTimeoutRef.current) {
+      clearTimeout(trackEndTimeoutRef.current);
+      trackEndTimeoutRef.current = null;
+    }
+    if (!trackDuration || trackDuration <= 0) return;
+
+    // Schedule timeout for track duration (in ms) + small buffer
+    const timeoutMs = trackDuration * 1000 + 500; // 500ms buffer
+    trackEndTimeoutRef.current = setTimeout(() => {
+      // Only trigger if still playing (the event handlers would have cleared this if track ended normally)
+      if (isPlayingRef.current && handleTrackEndedRef.current) {
+        console.log('[Background fallback] Track end timeout fired, calling handleTrackEnded');
+        handleTrackEndedRef.current();
+      }
+      trackEndTimeoutRef.current = null;
+    }, timeoutMs);
+  };
+
+  const clearTrackEndTimeout = () => {
+    if (trackEndTimeoutRef.current) {
+      clearTimeout(trackEndTimeoutRef.current);
+      trackEndTimeoutRef.current = null;
+    }
   };
 
   // Refs used to decouple the progress-polling interval from React state
@@ -344,6 +376,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         audio.play().catch(e => console.warn('Fallback audio playback failed:', e));
         return;
       }
+      clearTrackEndTimeout();
       setIsLoading(false);
       setIsPlaying(false);
     };
@@ -439,6 +472,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
                 } else if (currentTrackRef.current && audioRef.current) {
                   // Fallback seamlessly to direct audio stream
                   console.log('Switching to HTML5 fallback stream');
+                  clearTrackEndTimeout();
                   setPlaybackEngine('html5');
                   audioRef.current.src = currentTrackRef.current.fallbackAudioUrl || currentTrackRef.current.audioUrl;
                   audioRef.current.playbackRate = playbackRate;
@@ -469,8 +503,26 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
     }, 300);
 
+    // Visibility change handler: when tab becomes visible again, check if the
+    // current track should have ended while we were in the background.
+    // This catches cases where YouTube onStateChange / HTML5 ended events
+    // didn't fire due to browser throttling in background tabs.
+    const handleVisibilityChange = () => {
+      if (!document.hidden && isPlayingRef.current && currentTrackRef.current) {
+        const elapsed = getManualElapsed();
+        const trackDuration = currentTrackRef.current.duration || 0;
+        if (trackDuration > 0 && elapsed >= trackDuration - 1) {
+          // Track should have ended while tab was hidden
+          console.log('[Visibility] Tab became visible, track should have ended, calling handleTrackEnded');
+          handleTrackEndedRef.current();
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     return () => {
       clearInterval(checkInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       audio.removeEventListener('timeupdate', handleTimeUpdate);
       audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
       audio.removeEventListener('play', handlePlay);
@@ -556,11 +608,17 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         if (playbackEngine === 'youtube' && ytPlayerRef.current) {
           ytPlayerRef.current.seekTo(0, true);
           ytPlayerRef.current.playVideo();
+          if (currentTrack?.duration) {
+            scheduleTrackEndTimeout(currentTrack.duration);
+          }
           return;
         }
         if (audioRef.current) {
           audioRef.current.currentTime = 0;
           audioRef.current.play().catch(console.error);
+          if (currentTrack?.duration) {
+            scheduleTrackEndTimeout(currentTrack.duration);
+          }
         }
         return;
       }
@@ -765,6 +823,9 @@ handleTrackEndedRef.current = handleTrackEnded;
   };
 
   const loadAndPlay = async (track: Track) => {
+    // Clear any pending track-end timeout from previous track
+    clearTrackEndTimeout();
+
     // Sanitize any stale iTunes preview URLs that may have been saved to
     // localStorage in older versions of the app. We never play previews.
     track = sanitizeTrackAudioUrls(track);
@@ -856,6 +917,7 @@ handleTrackEndedRef.current = handleTrackEnded;
           ytPlayerRef.current.playVideo();
           setIsPlaying(true);
           setIsLoading(false);
+          scheduleTrackEndTimeout(resolvedDuration);
           return;
         } catch (e) {
           console.warn('YouTube loadVideoById failed, trying HTML5 fallback:', e);
@@ -883,6 +945,7 @@ handleTrackEndedRef.current = handleTrackEnded;
               ytPlayerRef.current.playVideo();
               setIsPlaying(true);
               setIsLoading(false);
+              scheduleTrackEndTimeout(resolvedDuration);
             } catch (e) {
               console.warn('YouTube playback failed after wait, trying HTML5:', e);
               playHtml5Fallback();
@@ -935,6 +998,7 @@ handleTrackEndedRef.current = handleTrackEnded;
           .then(() => {
             setIsPlaying(true);
             setIsLoading(false);
+            scheduleTrackEndTimeout(resolvedDuration);
           })
           .catch(err => {
             console.warn('Primary stream autoplay or play error:', err);
@@ -945,6 +1009,7 @@ handleTrackEndedRef.current = handleTrackEnded;
               audioRef.current.play().then(() => {
                 setIsPlaying(true);
                 setIsLoading(false);
+                scheduleTrackEndTimeout(resolvedDuration);
               }).catch(e => {
                 console.warn('Fallback stream error:', e);
                 setIsLoading(false);
@@ -999,6 +1064,7 @@ const togglePlay = () => {
 
       if (playbackEngine === 'youtube' && ytPlayerRef.current) {
         if (isPlaying) {
+          clearTrackEndTimeout();
           ytPlayerRef.current.pauseVideo();
           setIsPlaying(false);
           if (playStartedAtRef.current !== null) {
@@ -1011,21 +1077,30 @@ const togglePlay = () => {
           if (playStartedAtRef.current === null) {
             playStartedAtRef.current = Date.now() / 1000;
           }
+          // Schedule track-end timeout for resumed playback
+          if (currentTrack?.duration) {
+            scheduleTrackEndTimeout(currentTrack.duration);
+          }
         }
         return;
       }
 
       if (!audioRef.current) return;
       if (isPlaying) {
+        clearTrackEndTimeout();
         audioRef.current.pause();
         setIsPlaying(false);
       } else {
         audioRef.current.play().catch(console.error);
         setIsPlaying(true);
+        if (currentTrack?.duration) {
+          scheduleTrackEndTimeout(currentTrack.duration);
+        }
       }
     };
 
     const pause = () => {
+      clearTrackEndTimeout();
       if (playbackEngine === 'youtube' && ytPlayerRef.current) {
         ytPlayerRef.current.pauseVideo();
         setIsPlaying(false);
@@ -1046,9 +1121,15 @@ const togglePlay = () => {
         if (playStartedAtRef.current === null) {
           playStartedAtRef.current = Date.now() / 1000;
         }
+        if (currentTrack?.duration) {
+          scheduleTrackEndTimeout(currentTrack.duration);
+        }
       } else if (audioRef.current) {
         audioRef.current.play().catch(console.error);
         setIsPlaying(true);
+        if (currentTrack?.duration) {
+          scheduleTrackEndTimeout(currentTrack.duration);
+        }
       }
     };
 
